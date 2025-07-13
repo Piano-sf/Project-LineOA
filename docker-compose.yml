@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  line-bot-face-recognition:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: line-bot-face-recognition
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./logs:/app/logs
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token.pickle:/app/token.pickle
+      - ./.env:/app/.env:ro
+    environment:
+      - PYTHONPATH=/app
+      - FLASK_APP=app.py
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - line-bot-network
+
+  # Optional: Add Redis for caching (if needed in future)
+  # redis:
+  #   image: redis:6-alpine
+  #   container_name: line-bot-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   restart: unless-stopped
+  #   networks:
+  #     - line-bot-network
+
+networks:
+  line-bot-network:
+    driver: bridge
+
+# volumes:
+#   redis_data:

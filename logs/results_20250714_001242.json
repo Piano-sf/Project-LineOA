@@ -1,0 +1,21 @@
+{
+  "timestamp": "2025-07-14T00:12:42.008912",
+  "user_image": "IMG_0472.jpg",
+  "search_folder": "images_from_drive",
+  "threshold": 0.4,
+  "best_match": {
+    "image": "images_from_drive\\IMG_8530.jpg",
+    "score": 0.6415658593177795
+  },
+  "all_results": [
+    {
+      "image": "IMG_8530.jpg",
+      "score": 0.6415658593177795
+    },
+    {
+      "image": "IMG_0950.jpg",
+      "score": 0.6107129454612732
+    }
+  ],
+  "total_images_processed": 2
+}
