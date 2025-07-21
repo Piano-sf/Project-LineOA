@@ -34,6 +34,10 @@ COSINE_SIM_THRESHOLD = 0.4
 # === Initialize Flask App ===
 app = Flask(__name__)
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    return 'OK', 200
+
 # === Initialize LINE Bot API ===
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
