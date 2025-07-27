@@ -1,0 +1,24 @@
+<h2>LINE Token Config</h2>
+<form id="tokenForm">
+  <input type="text" id="LINE_CHANNEL_ACCESS_TOKEN" placeholder="LINE Channel Access Token">
+  <input type="text" id="LINE_CHANNEL_SECRET" placeholder="LINE Channel Secret">
+  <button type="submit">Save Token</button>
+</form>
+
+<script>
+document.getElementById("tokenForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const tokenData = {
+    LINE_CHANNEL_ACCESS_TOKEN: document.getElementById("LINE_CHANNEL_ACCESS_TOKEN").value,
+    LINE_CHANNEL_SECRET: document.getElementById("LINE_CHANNEL_SECRET").value
+  };
+
+  await fetch("/admin/api/tokens", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(tokenData)
+  });
+
+  alert("✅ LINE Token updated!");
+};
+</script>

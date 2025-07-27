@@ -10,7 +10,7 @@ import requests
 import time
 from urllib.parse import quote
 from datetime import datetime
-from flask import Flask, request, abort
+from flask import Flask, request, abort, render_template, redirect, url_for, session, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
@@ -37,8 +37,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration with environment variables
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
-LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+def load_line_tokens():
+    try:
+        with open("tokens.json", "r") as f:
+            data = json.load(f)
+            return data.get("LINE_CHANNEL_ACCESS_TOKEN"), data.get("LINE_CHANNEL_SECRET")
+    except:
+        return None, None
+
+LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET = load_line_tokens()
+
 GOOGLE_DRIVE_FOLDER_ID = os.getenv('GOOGLE_DRIVE_FOLDER_ID', '1BNmuKRL1vQE2czc9snVg48-S7O6fAjSd')
 COSINE_SIM_THRESHOLD = float(os.getenv('COSINE_SIM_THRESHOLD', '0.35'))
 
@@ -61,9 +69,58 @@ print("✅ Configuration validated successfully")
 # === Initialize Flask App ===
 app = Flask(__name__)
 
+app.secret_key = "supersecretkey"  # change to a strong key in production
+
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "1234"  # temporary password, can change later
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     return 'OK', 200
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session["admin_logged_in"] = True
+            return redirect(url_for("admin_dashboard"))
+        return "❌ Invalid credentials"
+    return render_template("login.html")
+
+@app.route("/admin/dashboard")
+def admin_dashboard():
+    if not session.get("admin_logged_in"):
+        return redirect(url_for("admin_login"))
+
+    try:
+        with open("tokens.json", "r") as f:
+            tokens = json.load(f)
+    except:
+        tokens = []
+    return render_template("dashboard.html", tokens=tokens)
+
+@app.route("/admin/api/tokens", methods=["POST"])
+def add_token():
+    if not session.get("admin_logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    new_token_data = request.json  # expects keys: LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET
+
+    # Save to file
+    with open("tokens.json", "w") as f:
+        json.dump(new_token_data, f, indent=2)
+
+    global LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, line_bot_api
+    LINE_CHANNEL_ACCESS_TOKEN = new_token_data["LINE_CHANNEL_ACCESS_TOKEN"]
+    LINE_CHANNEL_SECRET = new_token_data["LINE_CHANNEL_SECRET"]
+
+    # ✅ Only recreate line_bot_api, not handler
+    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+
+    return jsonify({"message": "✅ LINE Token updated!"})
 
 # === Initialize LINE Bot API ===
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
