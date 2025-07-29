@@ -1,24 +1,41 @@
-<h2>LINE Token Config</h2>
-<form id="tokenForm">
-  <input type="text" id="LINE_CHANNEL_ACCESS_TOKEN" placeholder="LINE Channel Access Token">
-  <input type="text" id="LINE_CHANNEL_SECRET" placeholder="LINE Channel Secret">
-  <button type="submit">Save Token</button>
-</form>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LINE Token Config</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
 
-<script>
-document.getElementById("tokenForm").onsubmit = async (e) => {
-  e.preventDefault();
-  const tokenData = {
-    LINE_CHANNEL_ACCESS_TOKEN: document.getElementById("LINE_CHANNEL_ACCESS_TOKEN").value,
-    LINE_CHANNEL_SECRET: document.getElementById("LINE_CHANNEL_SECRET").value
-  };
+  <div class="card">
+    <h2>LINE Token Config</h2>
+    <form id="tokenForm">
+      <input type="text" id="LINE_CHANNEL_ACCESS_TOKEN" placeholder="LINE Channel Access Token" required>
+      <input type="text" id="LINE_CHANNEL_SECRET" placeholder="LINE Channel Secret" required>
+      <input type="text" id="GOOGLE_DRIVE_FOLDER_ID" placeholder="Google Drive Folder ID" required>
+      <button type="submit">💾 Save Token</button>
+    </form>
+  </div>
 
-  await fetch("/admin/api/tokens", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(tokenData)
-  });
+  <script>
+    document.getElementById("tokenForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const tokenData = {
+        LINE_CHANNEL_ACCESS_TOKEN: document.getElementById("LINE_CHANNEL_ACCESS_TOKEN").value,
+        LINE_CHANNEL_SECRET: document.getElementById("LINE_CHANNEL_SECRET").value,
+        GOOGLE_DRIVE_FOLDER_ID: document.getElementById("GOOGLE_DRIVE_FOLDER_ID").value
+      };
 
-  alert("✅ LINE Token updated!");
-};
-</script>
+      await fetch("/admin/api/tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(tokenData)
+      });
+
+      alert("✅ LINE Token updated!");
+    };
+  </script>
+
+</body>
+</html>
