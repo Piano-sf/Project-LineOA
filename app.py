@@ -8,8 +8,14 @@ import tempfile
 import base64
 import requests
 import time
+import pickle
+import hashlib
+import threading
+import traceback
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from sklearn.metrics.pairwise import cosine_similarity
 from flask import Flask, request, abort, render_template, redirect, url_for, session, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -35,6 +41,8 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+user_image_limits = {}  # Store user preferences for image limits
 
 # Configuration with environment variables
 def load_line_tokens():
@@ -150,6 +158,33 @@ def setup_logging():
     return logger
 
 logger = setup_logging()
+
+class EmbeddingCache:
+    def __init__(self, cache_file='face_embeddings_cache.pkl'):
+        self.cache_file = cache_file
+        self.cache = self.load_cache()
+    
+    def load_cache(self):
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'rb') as f:
+                    return pickle.load(f)
+        except:
+            pass
+        return {}
+    
+    def save_cache(self):
+        with open(self.cache_file, 'wb') as f:
+            pickle.dump(self.cache, f)
+    
+    def get_embedding(self, file_id):
+        return self.cache.get(file_id)
+    
+    def set_embedding(self, file_id, embeddings):
+        self.cache[file_id] = embeddings
+
+# Initialize cache globally
+embedding_cache = EmbeddingCache()
 
 # === Initialize InsightFace ===
 logger.info("📥 กำลังโหลดโมเดล InsightFace...")
@@ -450,15 +485,48 @@ def calculate_confidence_score(similarity, quality_score, face_size):
         return similarity
 
 def cosine_similarity(a, b):
-    """คำนวณ cosine similarity"""
+    """คำนวณ cosine similarity แบบปรับปรุง"""
     try:
-        norm_a = np.linalg.norm(a)
-        norm_b = np.linalg.norm(b)
+        # Ensure inputs are numpy arrays
+        a = np.array(a)
+        b = np.array(b)
         
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
+        # Handle different input shapes
+        if a.ndim == 1:
+            a = a.reshape(1, -1)
+        if b.ndim == 1:
+            b = b.reshape(1, -1)
         
-        return np.dot(a, b) / (norm_a * norm_b)
+        # If comparing single vector to multiple vectors
+        if a.shape[0] == 1 and b.shape[0] > 1:
+            # a is (1, 512), b is (n, 512)
+            norm_a = np.linalg.norm(a, axis=1, keepdims=True)
+            norm_b = np.linalg.norm(b, axis=1, keepdims=True)
+            
+            if norm_a == 0 or np.any(norm_b == 0):
+                return np.zeros(b.shape[0])
+            
+            # Compute dot product: (1, 512) @ (512, n) = (1, n)
+            dot_product = np.dot(a, b.T).flatten()
+            norms = (norm_a * norm_b.T).flatten()
+            
+            return dot_product / norms
+        
+        # If comparing multiple vectors to multiple vectors
+        elif a.shape[0] > 1 and b.shape[0] > 1:
+            # Use sklearn's implementation for efficiency
+            from sklearn.metrics.pairwise import cosine_similarity as sk_cosine_similarity
+            return sk_cosine_similarity(a, b)
+        
+        # Single vector to single vector
+        else:
+            norm_a = np.linalg.norm(a)
+            norm_b = np.linalg.norm(b)
+            
+            if norm_a == 0 or norm_b == 0:
+                return 0.0
+            
+            return np.dot(a.flatten(), b.flatten()) / (norm_a * norm_b)
         
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการคำนวณ cosine similarity: {str(e)}")
@@ -580,111 +648,142 @@ def log_matching_metrics(matches, processing_time, user_id):
     except Exception as e:
         logger.error(f"❌ ไม่สามารถบันทึก metrics ได้: {str(e)}")
         return {}
-
+    
+def fast_find_similar_faces(user_embeddings, max_results=5):
+    """Fast similarity search using vectorized operations - FIXED"""
+    
+    all_embeddings = []
+    file_mapping = []
+    
+    # Collect all cached embeddings
+    for file_id, cached_embeddings in embedding_cache.cache.items():
+        if cached_embeddings and isinstance(cached_embeddings, list):
+            for emb_data in cached_embeddings:
+                if isinstance(emb_data, dict) and 'embedding' in emb_data:
+                    all_embeddings.append(emb_data['embedding'])
+                    file_mapping.append({
+                        'file_id': file_id,
+                        'quality_score': emb_data.get('quality_score', 0.5),
+                        'face_size': emb_data.get('face_size', 1000)
+                    })
+    
+    if not all_embeddings:
+        return [], "No cached embeddings found"
+    
+    try:
+        # Convert to numpy array - ensure consistent shape
+        database_embeddings = np.array(all_embeddings)
+        logger.info(f"🔍 Database embeddings shape: {database_embeddings.shape}")
+        
+        best_matches = {}
+        
+        # Process each user face embedding
+        for user_face in user_embeddings:
+            if not isinstance(user_face, dict) or 'embedding' not in user_face:
+                continue
+                
+            user_embedding = np.array(user_face['embedding'])
+            logger.info(f"👤 User embedding shape: {user_embedding.shape}")
+            
+            # Ensure user_embedding is 2D for consistency
+            if user_embedding.ndim == 1:
+                user_embedding = user_embedding.reshape(1, -1)
+            
+            # Calculate similarities using fixed cosine_similarity function
+            similarities = cosine_similarity(user_embedding, database_embeddings)
+            
+            # Handle case where similarities is a single value or array
+            if np.isscalar(similarities):
+                similarities = [similarities]
+            elif isinstance(similarities, np.ndarray):
+                similarities = similarities.flatten()
+            
+            logger.info(f"📊 Calculated {len(similarities)} similarities")
+            
+            # Find matches above threshold
+            for i, similarity in enumerate(similarities):
+                if similarity >= COSINE_SIM_THRESHOLD:
+                    file_info = file_mapping[i]
+                    file_id = file_info['file_id']
+                    
+                    # Calculate confidence score
+                    confidence = similarity * file_info['quality_score']
+                    
+                    # Keep only the best match per file
+                    if file_id not in best_matches or confidence > best_matches[file_id]['confidence']:
+                        best_matches[file_id] = {
+                            'file_id': file_id,
+                            'similarity': float(similarity),  # Ensure it's a float
+                            'confidence': float(confidence)   # Ensure it's a float
+                        }
+        
+        # Sort matches by confidence
+        sorted_matches = sorted(best_matches.values(), key=lambda x: x['confidence'], reverse=True)
+        
+        logger.info(f"✅ Found {len(sorted_matches)} matches above threshold {COSINE_SIM_THRESHOLD}")
+        
+        return sorted_matches[:max_results], f"Found {len(sorted_matches)} matches"
+        
+    except Exception as e:
+        logger.error(f"❌ Error in fast_find_similar_faces: {str(e)}")
+        import traceback
+        logger.error(f"📍 Traceback: {traceback.format_exc()}")
+        return [], f"Error in similarity calculation: {str(e)}"
+    
 def find_similar_face_in_drive(user_image_bytes, user_id, max_results=5):
-    """ค้นหาใบหน้าที่คล้ายกันใน Google Drive แล้วส่งกลับสูงสุด max_results ภาพ"""
+    """Optimized face search using cached embeddings - FIXED"""
     start_time = time.time()
-    logger.info(f"🔍 เริ่มค้นหาใบหน้าสำหรับ user: {user_id}")
+    logger.info(f"🔍 Fast search for user: {user_id}")
 
-    # 1️⃣ ดึงใบหน้าผู้ใช้ (รองรับหลายหน้า)
+    # Get user face embeddings
     user_faces = get_all_face_embeddings_from_bytes(user_image_bytes, enhanced=True)
     if not user_faces:
-        return None, "ไม่พบใบหน้าในภาพที่ส่งมา กรุณาส่งภาพที่มีใบหน้าชัดเจน"
-
-    logger.info(f"👥 ตรวจพบใบหน้าทั้งหมด: {len(user_faces)} ใบหน้า")
+        return None, "ไม่พบใบหน้าในภาพที่ส่งมา"
 
     try:
-        # 2️⃣ โหลดภาพจาก Google Drive
+        # Find similar faces using fixed function
+        matches, message = fast_find_similar_faces(user_faces, max_results)
+        
+        if not matches:
+            processing_time = time.time() - start_time
+            logger.info(f"⚡ Fast search completed in {processing_time:.2f} seconds - No matches found")
+            return None, message
+        
+        # Get file information from Google Drive
         service = authenticate_google_drive()
-        drive_images = get_images_from_drive_folder(service, GOOGLE_DRIVE_FOLDER_ID)
-        if not drive_images:
-            return None, "ไม่พบภาพใน Google Drive"
-
-        matched_images = {}  # 📁 เก็บเฉพาะภาพที่ match อย่างน้อย 1 หน้า
-        processed_count = 0
-        best_score = -1.0
-
-        logger.info(f"📊 กำลังเปรียบเทียบกับ {len(drive_images)} ภาพ")
-
-        # 3️⃣ วนทุกใบหน้าผู้ใช้
-        for user_idx, user_face in enumerate(user_faces, start=1):
-            user_embedding = user_face["embedding"]
-            quality_score = user_face["quality_score"]
-            face_size = user_face["face_size"]
-
-            dynamic_threshold = adaptive_threshold(quality_score)
-            logger.info(f"🎯 Face #{user_idx}: Threshold = {dynamic_threshold:.3f}")
-
-            for image_info in drive_images:
-                try:
-                    file_id = image_info["id"]
-
-                    if file_id in matched_images:
-                        continue  # skip already matched
-
-                    image_bytes = download_image_from_drive(service, file_id)
-                    if image_bytes is None:
-                        continue
-
-                    target_faces = get_all_face_embeddings_from_bytes(image_bytes, enhanced=True)
-                    if not target_faces:
-                        continue
-
-                    for target in target_faces:
-                        target_embedding = target["embedding"]
-                        target_quality = target["quality_score"]
-                        target_face_size = target["face_size"]
-
-                        # 💡 กรองใบหน้าคุณภาพต่ำ
-                        if target_quality < 0.4 or target_face_size < 1500:
-                            continue
-
-                        similarity = advanced_similarity_calculation(
-                            user_embedding, target_embedding, method='weighted'
-                        )
-
-                        confidence = calculate_confidence_score(
-                            similarity,
-                            min(quality_score, target_quality),
-                            min(face_size, target_face_size)
-                        )
-
-                        processed_count += 1
-
-                        if similarity >= dynamic_threshold:
-                            matched_images[file_id] = {
-                                'image_info': image_info,
-                                'similarity': similarity,
-                                'confidence': confidence
-                            }
-
-                            if similarity > best_score:
-                                best_score = similarity
-
-                            break  # ✅ เจอแมทช์แล้วในภาพนี้ ไม่ต้องวนใบหน้าอื่น
-
-                except Exception as e:
-                    logger.error(f"❌ Error processing {image_info['name']}: {str(e)}")
-                    continue
-
-        # 4️⃣ สรุปผล
+        full_matches = []
+        
+        for match in matches:
+            try:
+                file_id = match['file_id']
+                file = service.files().get(fileId=file_id, fields='id,name,mimeType').execute()
+                
+                full_matches.append({
+                    'image_info': file,
+                    'similarity': match['similarity'],
+                    'confidence': match['confidence']
+                })
+                
+                logger.info(f"📁 Match: {file['name']} (similarity: {match['similarity']:.3f})")
+                
+            except Exception as e:
+                logger.error(f"❌ Error getting file info for {match.get('file_id', 'unknown')}: {e}")
+                continue
+        
         processing_time = time.time() - start_time
-        logger.info(f"📈 ประมวลผลเสร็จสิ้น: {processed_count} ใบหน้าใน {processing_time:.2f} วินาที")
-
-        all_matches = list(matched_images.values())
-        all_matches.sort(key=lambda x: x["confidence"], reverse=True)
-        top_matches = all_matches[:max_results]
-
-        logger.info(f"🏆 พบภาพที่ตรงกันทั้งหมด: {len(all_matches)} / ส่งกลับ: {len(top_matches)}")
-
-        if top_matches:
-            return top_matches, f"พบภาพที่ตรงกัน {len(top_matches)} ภาพ"
-        else:
-            return [], f"ไม่พบภาพที่ตรงกัน\nความคล้ายสูงสุด: {best_score:.2%}"
-
+        logger.info(f"⚡ Fast search completed in {processing_time:.2f} seconds")
+        
+        # Log metrics
+        log_matching_metrics(full_matches, processing_time, user_id)
+        
+        return full_matches, f"Found {len(full_matches)} matching images"
+        
     except Exception as e:
-        logger.error(f"❌ เกิดข้อผิดพลาดในการค้นหา: {str(e)}")
-        return None, f"เกิดข้อผิดพลาด: {str(e)}"
+        processing_time = time.time() - start_time
+        logger.error(f"❌ Error in find_similar_face_in_drive: {e}")
+        import traceback
+        logger.error(f"📍 Traceback: {traceback.format_exc()}")
+        return None, f"เกิดข้อผิดพลาด: {e}"
     
 def get_all_face_embeddings_from_bytes(image_bytes, enhanced=True):
     """ดึง embeddings ของใบหน้าทุกใบในภาพ"""
@@ -743,6 +842,37 @@ def get_all_face_embeddings_from_bytes(image_bytes, enhanced=True):
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผลภาพ (multi-face): {str(e)}")
         return []
+    
+def build_embeddings_database():
+    """Pre-process all images and cache embeddings"""
+    logger.info("🔄 Building embeddings database...")
+    
+    service = authenticate_google_drive()
+    drive_images = get_images_from_drive_folder(service, GOOGLE_DRIVE_FOLDER_ID)
+    
+    processed = 0
+    for image_info in drive_images:
+        file_id = image_info['id']
+        
+        if embedding_cache.get_embedding(file_id):
+            continue
+            
+        try:
+            image_bytes = download_image_from_drive(service, file_id)
+            if image_bytes:
+                embeddings = get_all_face_embeddings_from_bytes(image_bytes)
+                if embeddings:
+                    embedding_cache.set_embedding(file_id, embeddings)
+                    processed += 1
+                    
+                    if processed % 10 == 0:
+                        logger.info(f"📊 Processed: {processed}/{len(drive_images)}")
+                        embedding_cache.save_cache()
+        except Exception as e:
+            logger.error(f"❌ Error processing {file_id}: {e}")
+    
+    embedding_cache.save_cache()
+    logger.info(f"✅ Database built: {processed} images processed")
 
 # === Flex Message Creation ===
 def create_result_flex_message(result_image, message, similarity_score=None, image_url=None):
@@ -918,55 +1048,155 @@ def create_carousel_message(matches):
 
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
+    """จัดการรูปภาพที่ส่งมา - ส่งกลับทุกภาพที่พบ"""
     user_id = event.source.user_id
     message_id = event.message.id
     logger.info(f"📸 รับภาพจาก {user_id}, message_id: {message_id}")
     
     try:
+        # Send initial processing message
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="🔍 กำลังประมวลผลภาพ กรุณารอสักครู่...")
         )
 
-        # ดาวน์โหลดภาพจาก LINE
+        # Download image from LINE
         message_content = line_bot_api.get_message_content(message_id)
         image_bytes = b''.join(chunk for chunk in message_content.iter_content())
         logger.info(f"📥 ดาวน์โหลดภาพสำเร็จ ({len(image_bytes)} bytes)")
 
-        # ค้นหาใบหน้าที่คล้ายกัน
+        # Search for similar faces - increase max_results to get more matches
         matches, message = find_similar_face_in_drive(image_bytes, user_id, max_results=50)
 
-        if matches:
-            def chunked(lst, n):
-                for i in range(0, len(lst), n):
-                    yield lst[i:i + n]
-                    
-            if matches:
-                for m in matches:
-                    image_info = m['image_info']
-                    file_id = image_info['id']
-                    image_url = create_public_drive_link(file_id)
-
-                    if image_url:
+        if matches and len(matches) > 0:
+            total_matches = len(matches)
+            logger.info(f"✅ พบภาพที่ตรงกัน {total_matches} ภาพ")
+            
+            # Send status message with total count
+            line_bot_api.push_message(
+                user_id,
+                TextSendMessage(text=f"🎉 พบภาพที่ตรงกัน {total_matches} ภาพ\n📤 กำลังส่งภาพทั้งหมด...")
+            )
+            
+            # Configuration for sending images
+            MAX_IMAGES_PER_BATCH = 10  # Send in batches to avoid overwhelming user
+            DELAY_BETWEEN_IMAGES = 0.8  # Seconds delay to respect LINE rate limits
+            DELAY_BETWEEN_BATCHES = 2.0  # Longer delay between batches
+            
+            sent_count = 0
+            failed_count = 0
+            
+            # Send all matching images in batches
+            for batch_start in range(0, total_matches, MAX_IMAGES_PER_BATCH):
+                batch_end = min(batch_start + MAX_IMAGES_PER_BATCH, total_matches)
+                current_batch = matches[batch_start:batch_end]
+                
+                # Send batch info
+                if total_matches > MAX_IMAGES_PER_BATCH:
+                    line_bot_api.push_message(
+                        user_id,
+                        TextSendMessage(text=f"📦 กำลังส่งชุดที่ {(batch_start//MAX_IMAGES_PER_BATCH)+1}: ภาพที่ {batch_start+1}-{batch_end}")
+                    )
+                
+                # Send each image in current batch
+                for i, match in enumerate(current_batch):
+                    try:
+                        image_info = match['image_info']
+                        file_id = image_info['id']
+                        similarity = match['similarity']
+                        confidence = match.get('confidence', similarity)
+                        
+                        # Create public link for the image
+                        image_url = create_public_drive_link(file_id)
+                        
+                        if image_url:
+                            # Send text with image info first
+                            info_text = (
+                                f"📁 {image_info['name']}\n"
+                                f"🎯 ความคล้าย: {similarity:.1%}\n"
+                                f"⭐ ความมั่นใจ: {confidence:.1%}\n"
+                                f"🔢 ลำดับ: {sent_count + 1}/{total_matches}"
+                            )
+                            
+                            line_bot_api.push_message(user_id, TextSendMessage(text=info_text))
+                            time.sleep(0.3)  # Small delay between text and image
+                            
+                            # Send the actual image
+                            line_bot_api.push_message(
+                                user_id,
+                                ImageSendMessage(
+                                    original_content_url=image_url,
+                                    preview_image_url=image_url
+                                )
+                            )
+                            
+                            sent_count += 1
+                            logger.info(f"📤 ส่งภาพ {sent_count}/{total_matches}: {image_info['name']}")
+                            
+                        else:
+                            # Fallback: send text with Drive link
+                            drive_link = f"https://drive.google.com/file/d/{file_id}/view"
+                            fallback_text = (
+                                f"📁 {image_info['name']}\n"
+                                f"🎯 ความคล้าย: {similarity:.1%}\n"
+                                f"🔗 ลิงก์: {drive_link}\n"
+                                f"🔢 ลำดับ: {sent_count + 1}/{total_matches}"
+                            )
+                            
+                            line_bot_api.push_message(user_id, TextSendMessage(text=fallback_text))
+                            sent_count += 1
+                            
+                        # Delay between images to respect rate limits
+                        time.sleep(DELAY_BETWEEN_IMAGES)
+                        
+                    except Exception as e:
+                        failed_count += 1
+                        logger.error(f"❌ Error sending image {sent_count + failed_count}: {e}")
+                        
+                        # Send error message for this specific image
                         line_bot_api.push_message(
                             user_id,
-                            ImageSendMessage(
-                                original_content_url=image_url,
-                                preview_image_url=image_url
-                            )
+                            TextSendMessage(text=f"❌ ไม่สามารถส่งภาพ {image_info.get('name', 'ไม่ทราบชื่อ')} ได้")
                         )
-                        time.sleep(1)  # avoid LINE rate limit
-
+                        continue
+                
+                # Delay between batches (except for last batch)
+                if batch_end < total_matches:
+                    logger.info(f"⏸️ รอ {DELAY_BETWEEN_BATCHES} วินาทีก่อนส่งชุดถัดไป...")
+                    time.sleep(DELAY_BETWEEN_BATCHES)
+            
+            # Send final summary
+            summary_text = (
+                f"✅ การส่งภาพเสร็จสิ้น!\n"
+                f"📊 สรุป:\n"
+                f"• ส่งสำเร็จ: {sent_count} ภาพ\n"
+                f"• ส่งไม่สำเร็จ: {failed_count} ภาพ\n"
+                f"• รวมทั้งหมด: {total_matches} ภาพ"
+            )
+            
+            line_bot_api.push_message(user_id, TextSendMessage(text=summary_text))
+            
         else:
-            flex_message = create_result_flex_message(None, message)
-            line_bot_api.push_message(user_id, flex_message)
+            # No matches found
+            line_bot_api.push_message(
+                user_id,
+                TextSendMessage(
+                    text="😔 ไม่พบภาพที่ตรงกัน\n💡 ลองส่งภาพอื่นที่มีใบหน้าชัดเจนกว่า"
+                )
+            )
 
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผลภาพ: {str(e)}")
-        line_bot_api.push_message(
-            user_id,
-            TextSendMessage(text=f"เกิดข้อผิดพลาดในการประมวลผลภาพ: {str(e)}")
-        )
+        import traceback
+        logger.error(f"📍 Traceback: {traceback.format_exc()}")
+        
+        try:
+            line_bot_api.push_message(
+                user_id,
+                TextSendMessage(text=f"❌ เกิดข้อผิดพลาด: {str(e)}\n🔄 กรุณาลองใหม่อีกครั้ง")
+            )
+        except:
+            logger.error("❌ ไม่สามารถส่งข้อความแจ้งข้อผิดพลาดได้")
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -1034,6 +1264,8 @@ if __name__ == "__main__":
     # ทดสอบการเชื่อมต่อ Google Drive ก่อนเริ่ม server
     try:
         if test_google_drive_connection():
+            logger.info("🔄 Building initial embeddings database...")
+            build_embeddings_database()
             logger.info("🚀 เริ่ม Flask server...")
             app.run(host='0.0.0.0', port=5000, debug=False)
         else:
