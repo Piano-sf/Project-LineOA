@@ -44,26 +44,29 @@ load_dotenv()
 
 user_image_limits = {}  # Store user preferences for image limits
 
-# Configuration with environment variables
+# Configuration with environment variables and tokens.json fallback
 def load_line_tokens():
     try:
         with open("tokens.json", "r") as f:
             data = json.load(f)
-            return data.get("LINE_CHANNEL_ACCESS_TOKEN"), data.get("LINE_CHANNEL_SECRET")
-    except:
-        return None, None
+            return (
+                data.get("LINE_CHANNEL_ACCESS_TOKEN") or os.getenv("LINE_CHANNEL_ACCESS_TOKEN"),
+                data.get("LINE_CHANNEL_SECRET") or os.getenv("LINE_CHANNEL_SECRET"),
+                data.get("GOOGLE_DRIVE_FOLDER_ID") or os.getenv("GOOGLE_DRIVE_FOLDER_ID"),
+            )
+    except Exception:
+        return (
+            os.getenv("LINE_CHANNEL_ACCESS_TOKEN"),
+            os.getenv("LINE_CHANNEL_SECRET"),
+            os.getenv("GOOGLE_DRIVE_FOLDER_ID"),
+        )
 
-LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET = load_line_tokens()
-
-GOOGLE_DRIVE_FOLDER_ID = os.getenv('GOOGLE_DRIVE_FOLDER_ID', '1BNmuKRL1vQE2czc9snVg48-S7O6fAjSd')
+LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GOOGLE_DRIVE_FOLDER_ID = load_line_tokens()
 COSINE_SIM_THRESHOLD = float(os.getenv('COSINE_SIM_THRESHOLD', '0.35'))
 
-# Validate required environment variables
-required_vars = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET']
-missing_vars = [var for var in required_vars if not os.getenv(var)]
-
-if missing_vars:
-    raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+# Validate required configuration
+if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    raise ValueError("Missing required LINE credentials: set them in .env or tokens.json")
 
 # Validate required files
 required_files = ['service-account-key.json']
@@ -77,10 +80,10 @@ print("✅ Configuration validated successfully")
 # === Initialize Flask App ===
 app = Flask(__name__)
 
-app.secret_key = "supersecretkey"  # change to a strong key in production
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-me-in-production")
 
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "1234"  # temporary password, can change later
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "1234")
 
 
 @app.route('/health', methods=['GET'])
@@ -121,9 +124,11 @@ def add_token():
     with open("tokens.json", "w") as f:
         json.dump(new_token_data, f, indent=2)
 
-    global LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, line_bot_api
+    global LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GOOGLE_DRIVE_FOLDER_ID, line_bot_api
     LINE_CHANNEL_ACCESS_TOKEN = new_token_data["LINE_CHANNEL_ACCESS_TOKEN"]
     LINE_CHANNEL_SECRET = new_token_data["LINE_CHANNEL_SECRET"]
+    if "GOOGLE_DRIVE_FOLDER_ID" in new_token_data:
+        GOOGLE_DRIVE_FOLDER_ID = new_token_data["GOOGLE_DRIVE_FOLDER_ID"]
 
     # ✅ Only recreate line_bot_api, not handler
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)

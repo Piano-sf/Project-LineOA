@@ -1,9 +1,0 @@
-2025-07-14 01:22:51,328 - INFO - 🚀 LINE Bot เริ่มทำงาน - Log: logs/line_bot_20250714_012251.log
-2025-07-14 01:22:51,329 - INFO - 📥 กำลังโหลดโมเดล InsightFace...
-2025-07-14 01:22:52,652 - INFO - ✅ โหลดโมเดล InsightFace สำเร็จ
-2025-07-14 01:22:52,652 - INFO - 🌟 เริ่มต้น LINE Bot Server
-2025-07-14 01:22:53,961 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
- * Running on all addresses (0.0.0.0)
- * Running on http://127.0.0.1:5000
- * Running on http://192.168.1.100:5000
-2025-07-14 01:22:53,961 - INFO - [33mPress CTRL+C to quit[0m

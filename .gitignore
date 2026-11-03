@@ -84,9 +84,12 @@ data/
 credentials.json
 token.pickle
 service-account-key.json
+tokens.json
 
-# LINE Bot configuration
+# LINE Bot configuration & caches
 .env
+*.pkl
+*.whl
 
 # Docker
 .dockerignore
